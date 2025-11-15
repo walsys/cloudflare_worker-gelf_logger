@@ -9,6 +9,7 @@
  * - Multiple log levels (Emergency to Debug)
  * - Automatic timestamp generation
  * - Context-aware logging
+ * - Optional console method overloading for automatic GELF forwarding
  */
 
 export class GELFLogger {
@@ -39,6 +40,7 @@ export class GELFLogger {
 	 * @param {Object} config.globalFields - Global custom fields to include in all logs
 	 * @param {number} config.minLevel - Minimum log level to send (default: INFO)
 	 * @param {boolean} config.consoleLog - Also log to console (default: true)
+	 * @param {boolean} config.overloadConsole - Overload global console methods to forward logs to GELF (default: false)
 	 * @param {number} config.timeout - Request timeout in ms (default: 5000)
 	 * @param {number} config.maxFailedMessages - Maximum failed messages to track (default: 50)
 	 */
@@ -100,6 +102,7 @@ export class GELFLogger {
 		this.globalFields = config.globalFields || {};
 		this.minLevel = config.minLevel !== undefined ? config.minLevel : GELFLogger.LEVELS.INFO;
 		this.consoleLog = config.consoleLog !== undefined ? config.consoleLog : true;
+		this.overloadConsole = config.overloadConsole !== undefined ? config.overloadConsole : false; // New config option
 		this.timeout = config.timeout || 5000;
 
 		// Internal state (non-blocking promise tracking)
@@ -113,6 +116,11 @@ export class GELFLogger {
 		// Track failed messages for debugging
 		this.failedMessages = [];
 		this.maxFailedMessages = config.maxFailedMessages || 50; // Limit to prevent memory issues
+
+		// Setup console overloading if enabled
+		if (this.overloadConsole) {
+			GELFLogger._setupConsoleOverload(this);
+		}
 	}
 
 	/**
@@ -138,6 +146,15 @@ export class GELFLogger {
 
 		// Add full message if provided
 		if (fullMessage) {
+			//attempt to parse fullMessage as string
+			if (typeof fullMessage !== 'string') {
+				//handle if json
+				try {
+					fullMessage = JSON.stringify(fullMessage);
+				} catch (e) {
+					fullMessage = String(fullMessage);
+				}
+			}
 			message.full_message = String(fullMessage);
 		}
 
@@ -232,7 +249,7 @@ export class GELFLogger {
 					});
 
 					// Console warning
-					if (this.consoleLog) {
+					if (this.consoleLog && !this.overloadConsole) { // Only log if not overloading console
 						console.warn(`GELFLogger: HTTP ${response.status} from ${this.endpoint}`, {
 							short_message: gelfMessage.short_message,
 							level: gelfMessage.level
@@ -261,7 +278,7 @@ export class GELFLogger {
 				});
 
 				// Console warning (skip timeout warnings in quiet mode)
-				if (this.consoleLog && error.name !== 'AbortError') {
+				if (this.consoleLog && !this.overloadConsole && error.name !== 'AbortError') { // Only log if not overloading console
 					console.warn('GELFLogger: Send failed:', errorMessage, {
 						short_message: gelfMessage.short_message,
 						level: gelfMessage.level,
@@ -295,7 +312,7 @@ export class GELFLogger {
 		}
 
 		// Also log to console in verbose mode
-		if (this.consoleLog) {
+		if (this.consoleLog && !this.overloadConsole) { // Only log if not overloading console
 			console.error('GELFLogger: Failed to emit log', {
 				reason: failureInfo.reason,
 				error: failureInfo.error,
@@ -343,8 +360,8 @@ export class GELFLogger {
 			// Send to GELF endpoint (non-blocking)
 			this._send(gelfMessage);
 
-			// Also log to console if enabled
-			if (this.consoleLog) {
+			// Also log to console if enabled and not overloading console
+			if (this.consoleLog && !this.overloadConsole) {
 				const levelName = Object.keys(GELFLogger.LEVELS).find(
 					key => GELFLogger.LEVELS[key] === level
 				);
@@ -353,7 +370,7 @@ export class GELFLogger {
 		} catch (error) {
 			// Graceful failure - never interrupt main thread
 			this.stats.failed++;
-			if (this.consoleLog) {
+			if (this.consoleLog && !this.overloadConsole) { // Only log if not overloading console
 				console.error('GELFLogger: Internal error:', error.message);
 			}
 		}
@@ -471,6 +488,7 @@ export class GELFLogger {
 			globalFields: { ...this.globalFields, ...contextFields },
 			minLevel: this.minLevel,
 			consoleLog: this.consoleLog,
+			overloadConsole: this.overloadConsole, // Pass overloadConsole to child
 			timeout: this.timeout
 		});
 		// Preserve Cloudflare context in child logger
@@ -490,7 +508,7 @@ export class GELFLogger {
 			this.pendingPromises = [];
 		} catch (error) {
 			// Silent fail on flush errors
-			if (this.consoleLog) {
+			if (this.consoleLog && !this.overloadConsole) { // Only log if not overloading console
 				console.warn('GELFLogger: Flush error:', error.message);
 			}
 		}
@@ -561,5 +579,107 @@ export class GELFLogger {
 			skipped: 0
 		};
 		this.failedMessages = [];
+	}
+
+	/**
+	 * Overload console methods to forward logs to GELF.
+	 * @param {GELFLogger} logger - The GELFLogger instance.
+	 * @private
+	 */
+	static _setupConsoleOverload(logger) {
+		// Store original console methods to allow calling them
+		const originalConsole = {};
+		const consoleMethods = ['log', 'info', 'warn', 'error', 'debug', 'trace', 'dir', 'assert'];
+
+		consoleMethods.forEach(methodName => {
+			if (typeof console[methodName] === 'function') {
+				originalConsole[methodName] = console[methodName];
+
+				console[methodName] = (...args) => {
+					// Call original console method first
+					originalConsole[methodName](...args);
+
+					// Determine GELF level
+					let level;
+					switch (methodName) {
+						case 'error':
+						case 'assert':
+							level = GELFLogger.LEVELS.ERROR;
+							break;
+						case 'warn':
+							level = GELFLogger.LEVELS.WARNING;
+							break;
+						case 'info':
+						case 'log':
+						case 'dir':
+							level = GELFLogger.LEVELS.INFO;
+							break;
+						case 'debug':
+						case 'trace':
+							level = GELFLogger.LEVELS.DEBUG;
+							break;
+						default:
+							level = GELFLogger.LEVELS.INFO;
+					}
+
+					// Format message for GELF
+					let shortMessage = '';
+					let fullMessage = null;
+					let customFields = {};
+
+					// For assert, the first argument is the condition, the rest are messages
+					if (methodName === 'assert' && !args[0]) { // Only log if assertion fails
+						shortMessage = `Assertion Failed: ${String(args[1] || 'no message')}`;
+						if (args.length > 2) {
+							fullMessage = args.slice(2).map(arg => {
+								if (typeof arg === 'object' && arg !== null) return JSON.stringify(arg);
+								return String(arg);
+							}).join(' ');
+						}
+						customFields = { ...customFields, _console_assert: true };
+					} else if (methodName !== 'assert') { // Normal logging for other methods
+						if (args.length > 0) {
+							// First argument is usually the main message
+							shortMessage = String(args[0]);
+
+							// If there are more arguments, stringify them for fullMessage or custom fields
+							if (args.length > 1) {
+								const remainingArgs = args.slice(1);
+								// Attempt to find an object for custom fields
+								const lastArg = remainingArgs[remainingArgs.length - 1];
+								if (typeof lastArg === 'object' && lastArg !== null && !Array.isArray(lastArg) && !(lastArg instanceof Error)) {
+									customFields = lastArg;
+									fullMessage = remainingArgs.slice(0, -1).map(arg => {
+										if (typeof arg === 'object' && arg !== null) return JSON.stringify(arg);
+										return String(arg);
+									}).join(' ');
+								} else {
+									fullMessage = remainingArgs.map(arg => {
+										if (typeof arg === 'object' && arg !== null) return JSON.stringify(arg);
+										return String(arg);
+									}).join(' ');
+								}
+							}
+						}
+					} else { // If assert passes, don't log to GELF
+						return;
+					}
+
+
+					// Handle trace specifically to include stack
+					if (methodName === 'trace') {
+						const error = new Error('Console Trace');
+						fullMessage = fullMessage ? `${fullMessage}\n${error.stack}` : error.stack;
+						customFields = { ...customFields, _console_trace: true };
+					}
+
+					// Call the GELF logger
+					logger._log(level, shortMessage, fullMessage, customFields);
+				};
+			}
+		});
+
+		// Store original console methods for potential restoration or internal use
+		logger._originalConsole = originalConsole;
 	}
 }
