@@ -1,0 +1,48 @@
+{
+	"name": "@walsys/cloudflare_worker-gelf_logger",
+	"version": "1.0.0",
+	"description": "Production-ready GELF logger for Cloudflare Workers with automatic context extraction",
+	"type": "module",
+	"main": "./src/gelf-logger.js",
+	"exports": {
+		".": "./src/gelf-logger.js"
+	},
+	"keywords": [
+		"cloudflare",
+		"workers",
+		"gelf",
+		"graylog",
+		"logging",
+		"logger",
+		"cloudflare-workers",
+		"syslog",
+		"monitoring",
+		"observability"
+	],
+	"author": "WAL Systems",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/walsys/cloudflare_worker-gelf_logger.git"
+	},
+	"bugs": {
+		"url": "https://github.com/walsys/cloudflare_worker-gelf_logger/issues"
+	},
+	"homepage": "https://github.com/walsys/cloudflare_worker-gelf_logger#readme",
+	"engines": {
+		"node": ">=16.0.0"
+	},
+	"files": [
+		"src/gelf-logger.js",
+		"README.md",
+		"LICENSE"
+	],
+	"peerDependencies": {
+		"@cloudflare/workers-types": "^4.0.0"
+	},
+	"peerDependenciesMeta": {
+		"@cloudflare/workers-types": {
+			"optional": true
+		}
+	}
+}

@@ -1,0 +1,36 @@
+# Development files
+wrangler.toml
+wrangler.jsonc
+.wrangler/
+.dev.vars
+.env
+PUBLISHING.md
+CHANGELOG.md
+
+# Testing
+test/
+tests/
+*.test.js
+*.spec.js
+coverage/
+
+# Git
+.git/
+.gitignore
+.github/
+
+# Build artifacts
+dist/
+build/
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
