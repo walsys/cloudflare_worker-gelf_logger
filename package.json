@@ -1,6 +1,6 @@
 {
 	"name": "@walsys/cloudflare_worker-gelf_logger",
-	"version": "1.0.0",
+	"version": "1.0.2",
 	"description": "Production-ready GELF logger for Cloudflare Workers with automatic context extraction",
 	"type": "module",
 	"main": "./src/gelf-logger.js",

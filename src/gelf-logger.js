@@ -365,7 +365,25 @@ export class GELFLogger {
 				const levelName = Object.keys(GELFLogger.LEVELS).find(
 					key => GELFLogger.LEVELS[key] === level
 				);
-				console.log(`[${levelName}] ${shortMessage}`);
+				let logMessage = `[${levelName}]`;
+				//try and json parse shortMessage
+				try {
+					const parsed = JSON.parse(shortMessage);
+					logMessage += ` ${JSON.stringify(parsed, null, 2)}`;
+				} catch (e) {
+					logMessage += ` ${shortMessage}`;
+				}
+				//add fullMessage if exists
+				if (fullMessage) {
+					try {
+						const parsedFull = JSON.parse(fullMessage);
+						fullMessage = JSON.stringify(parsedFull, null, 2);
+						logMessage += `\n${fullMessage}`;
+					} catch (e) {
+						logMessage += `\n${fullMessage}`;
+					}
+				}
+				console.log(logMessage);
 			}
 		} catch (error) {
 			// Graceful failure - never interrupt main thread
