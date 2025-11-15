@@ -368,16 +368,16 @@ export class GELFLogger {
 				let logMessage = `[${levelName}]`;
 				//try and json parse shortMessage
 				try {
-					const parsed = JSON.parse(shortMessage);
-					logMessage += ` ${JSON.stringify(parsed, null, 2)}`;
+					JSON.parse(shortMessage);
+					logMessage += ` ${JSON.stringify(shortMessage)}`;
 				} catch (e) {
 					logMessage += ` ${shortMessage}`;
 				}
 				//add fullMessage if exists
 				if (fullMessage) {
 					try {
-						const parsedFull = JSON.parse(fullMessage);
-						fullMessage = JSON.stringify(parsedFull, null, 2);
+						JSON.parse(fullMessage);
+						fullMessage = JSON.stringify(fullMessage);
 						logMessage += `\n${fullMessage}`;
 					} catch (e) {
 						logMessage += `\n${fullMessage}`;
