@@ -1,0 +1,9 @@
+name = "gelf-logger-tests"
+main = "src/gelf-logger.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+GELF_LOGGING_URL = "http://localhost:12201/gelf"
+WORKER_NAME = "test-worker"
+ENVIRONMENT = "test"
+FUNCTION_NAME = "test-function"

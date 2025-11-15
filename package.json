@@ -7,6 +7,11 @@
 	"exports": {
 		".": "./src/gelf-logger.js"
 	},
+	"scripts": {
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:coverage": "vitest run --coverage"
+	},
 	"keywords": [
 		"cloudflare",
 		"workers",
@@ -44,5 +49,9 @@
 		"@cloudflare/workers-types": {
 			"optional": true
 		}
+	},
+	"devDependencies": {
+		"@cloudflare/vitest-pool-workers": "^0.10.7",
+		"vitest": "^4.0.9"
 	}
 }
