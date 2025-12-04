@@ -611,4 +611,75 @@ describe('GELFLogger', () => {
 			consoleSpy.mockRestore();
 		});
 	});
+
+	describe('Session ID', () => {
+		it('should use provided log_session_id', () => {
+			const sessionId = 'custom-session-id';
+			const logger = new GELFLogger({ env: mockEnv, log_session_id: sessionId });
+			expect(logger.log_session_id).toBe(sessionId);
+
+			// Verify it's sent in the message
+			logger.info('test message');
+			expect(fetchSpy).toHaveBeenCalled();
+			const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+			expect(body._log_session_id).toBe(sessionId);
+		});
+
+		it('should use env.LOG_SESSION_ID if provided', () => {
+			const sessionId = 'env-session-id';
+			const env = { ...mockEnv, LOG_SESSION_ID: sessionId };
+			const logger = new GELFLogger({ env });
+			expect(logger.log_session_id).toBe(sessionId);
+		});
+
+		it('should generate UUID if no session ID provided', () => {
+			const logger = new GELFLogger({ env: mockEnv });
+			expect(logger.log_session_id).toBeDefined();
+			expect(logger.log_session_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+		});
+	});
+
+	describe('Request Details', () => {
+		it('should extract extended request details', () => {
+			const extendedRequest = {
+				url: 'https://example.com/api/users?id=123',
+				method: 'POST',
+				headers: new Headers({
+					'cf-connecting-ip': '203.0.113.42',
+					'user-agent': 'Mozilla/5.0',
+					'cf-ray': 'ray-id-12345'
+				}),
+				cf: {
+					colo: 'SFO',
+					longitude: -122.4194,
+					latitude: 37.7749,
+					country: 'US',
+					city: 'San Francisco'
+				},
+			};
+			const logger = new GELFLogger({ env: mockEnv, request: extendedRequest });
+
+			expect(logger.cfContext.request_path).toBe('/api/users');
+			expect(logger.cfContext.request_host).toBe('example.com');
+			expect(logger.cfContext.request_method).toBe('POST');
+			expect(logger.cfContext.request_id).toBe('ray-id-12345');
+			expect(logger.cfContext.user_agent).toBe('Mozilla/5.0');
+			expect(logger.cfContext.client_ip).toBe('203.0.113.42');
+			expect(logger.cfContext.country).toBe('US');
+			expect(logger.cfContext.city).toBe('San Francisco');
+		});
+
+		it('should handle missing request headers gracefully', () => {
+			const minimalRequest = {
+				url: 'https://example.com',
+				method: 'GET',
+				headers: new Headers(),
+				cf: {}
+			};
+			const logger = new GELFLogger({ env: mockEnv, request: minimalRequest });
+			expect(logger.cfContext.request_path).toBe('/');
+			expect(logger.cfContext.request_method).toBe('GET');
+			expect(logger.cfContext.client_ip).toBeUndefined();
+		});
+	});
 });

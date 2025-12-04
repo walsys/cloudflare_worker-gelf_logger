@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 /**
  * GELF (Graylog Extended Log Format) Logger for Cloudflare Workers
  *
@@ -14,6 +16,9 @@
  */
 
 export class GELFLogger {
+	// AsyncLocalStorage for global context management
+	static #storage = new AsyncLocalStorage();
+
 	/**
 	 * GELF Log Levels (Syslog severity)
 	 * @see https://en.wikipedia.org/wiki/Syslog#Severity_level
@@ -33,8 +38,9 @@ export class GELFLogger {
 	 * Create a new GELF Logger instance
 	 *
 	 * @param {Object} config - Configuration object
-	 * @param {Object} config.env - Cloudflare Worker env object (automatically uses env.GELF_LOGGING_URL, env.WORKER_NAME, env.ENVIRONMENT, env.FUNCTION_NAME)
+	 * @param {Object} config.env - Cloudflare Worker env object (automatically uses env.GELF_LOGGING_URL, env.WORKER_NAME, env.ENVIRONMENT, env.FUNCTION_NAME, env.LOG_SESSION_ID)
 	 * @param {Request} config.request - Optional Cloudflare Request object (extracts colo, IP, longitude, latitude from request.cf)
+	 * @param {string} config.log_session_id - Optional session ID (UUID) to segment messages. Defaults to env.LOG_SESSION_ID or generates new UUID.
 	 * @param {string} config.endpoint - GELF HTTP endpoint URL (optional - will use env.GELF_LOGGING_URL if not provided)
 	 * @param {string} config.host - Hostname identifier (default: worker name from env.WORKER_NAME or 'cloudflare-worker')
 	 * @param {string} config.facility - Facility/application name (default: 'worker')
@@ -47,7 +53,8 @@ export class GELFLogger {
 	 */
 	constructor(config = {}) {
 		// Generate a unique session ID for this logger instance
-		this.log_session_id = crypto.randomUUID();
+		// Priority: config.log_session_id > config.env.LOG_SESSION_ID > crypto.randomUUID()
+		this.log_session_id = config.log_session_id || config.env?.LOG_SESSION_ID || crypto.randomUUID();
 
 		// Endpoint configuration - automatically use env.GELF_LOGGING_URL if available
 		this.endpoint = config.endpoint || config.env?.GELF_LOGGING_URL;
@@ -76,29 +83,52 @@ export class GELFLogger {
 			this.cfContext.function_name = config.env.FUNCTION_NAME;
 		}
 
-		// Optional: Extract Cloudflare request context
-		if (config.request?.cf) {
-			const cf = config.request.cf;
-
-			// Cloudflare data center (colo)
-			if (cf.colo) {
-				this.cfContext.colo = cf.colo;
+		// Optional: Extract request details and Cloudflare context
+		if (config.request) {
+			// Basic request details
+			try {
+				const url = new URL(config.request.url);
+				this.cfContext.request_path = url.pathname;
+				this.cfContext.request_host = url.hostname;
+			} catch (e) {
+				// Ignore URL parsing errors
 			}
 
-			// Geolocation
-			if (cf.longitude !== undefined) {
-				this.cfContext.longitude = cf.longitude;
-			}
-			if (cf.latitude !== undefined) {
-				this.cfContext.latitude = cf.latitude;
-			}
-		}
+			this.cfContext.request_method = config.request.method;
 
-		// Optional: Extract client IP from request headers
-		if (config.request?.headers) {
-			const clientIp = config.request.headers.get('cf-connecting-ip');
-			if (clientIp) {
-				this.cfContext.client_ip = clientIp;
+			if (config.request.headers) {
+				this.cfContext.request_id = config.request.headers.get('cf-ray') || config.request.headers.get('x-request-id');
+				this.cfContext.user_agent = config.request.headers.get('user-agent');
+
+				const clientIp = config.request.headers.get('cf-connecting-ip') || config.request.headers.get('x-forwarded-for');
+				if (clientIp) {
+					this.cfContext.client_ip = clientIp;
+				}
+			}
+
+			// Cloudflare specific context
+			if (config.request.cf) {
+				const cf = config.request.cf;
+
+				// Cloudflare data center (colo)
+				if (cf.colo) {
+					this.cfContext.colo = cf.colo;
+				}
+
+				// Geolocation
+				if (cf.longitude !== undefined) {
+					this.cfContext.longitude = cf.longitude;
+				}
+				if (cf.latitude !== undefined) {
+					this.cfContext.latitude = cf.latitude;
+				}
+
+				// Other useful CF fields
+				if (cf.country) this.cfContext.country = cf.country;
+				if (cf.city) this.cfContext.city = cf.city;
+				if (cf.region) this.cfContext.region = cf.region;
+				if (cf.asn) this.cfContext.asn = cf.asn;
+				if (cf.asOrganization) this.cfContext.as_organization = cf.asOrganization;
 			}
 		}
 
@@ -125,6 +155,26 @@ export class GELFLogger {
 		if (this.overloadConsole) {
 			GELFLogger._setupConsoleOverload(this);
 		}
+	}
+
+	/**
+	 * Get the current logger instance from the async context
+	 * Useful for accessing the logger without passing it around
+	 * 
+	 * @returns {GELFLogger|null} The current logger instance or null if not in context
+	 */
+	static get current() {
+		return this.#storage.getStore() || null;
+	}
+
+	/**
+	 * Run a callback with this logger instance in the async context
+	 * 
+	 * @param {Function} callback - Function to execute
+	 * @returns {*} Result of the callback
+	 */
+	run(callback) {
+		return GELFLogger.#storage.run(this, callback);
 	}
 
 	/**

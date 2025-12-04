@@ -16,6 +16,8 @@ A production-ready GELF (Graylog Extended Log Format) logger specifically design
 - 🏢 **Colo Tracking** - Know which Cloudflare data center handled the request
 - 🎯 **Custom Fields** - Add unlimited custom fields to any log
 - 🔄 **Context-Aware** - Child loggers preserve parent context
+- 🆔 **Session Tracking** - Unique session ID for tracing multi-instance executions
+- 🔍 **Extended Request Details** - Captures path, method, user agent, and more
 - 📈 **Built-in Statistics** - Track sent, failed, and skipped logs
 - 🛡️ **Graceful Failure** - Logging failures never crash your worker
 
@@ -64,6 +66,7 @@ The logger automatically consumes these Cloudflare Worker environment variables:
 | `WORKER_NAME` | Worker name (used as host identifier) | No | `'cloudflare-worker'` |
 | `ENVIRONMENT` | Environment name (e.g., production, staging) | No | Not logged if absent |
 | `FUNCTION_NAME` | Function/route name | No | Not logged if absent |
+| `LOG_SESSION_ID` | Session ID for message segmentation | No | Generated UUID |
 
 ### Setting Environment Variables
 
@@ -93,6 +96,9 @@ const logger = new GELFLogger({
   // Optional: Override host identifier
   host: 'custom-worker-name',
 
+  // Optional: Session ID (defaults to env.LOG_SESSION_ID or generated UUID)
+  log_session_id: 'custom-session-uuid',
+
   // Optional: Facility name
   facility: 'worker',
 
@@ -121,9 +127,19 @@ const logger = new GELFLogger({
 When you pass the `request` object, the logger automatically extracts and includes:
 
 - **`_colo`** - Cloudflare data center code (e.g., "SFO", "LHR")
-- **`_client_ip`** - Client's IP address from `cf-connecting-ip` header
+- **`_client_ip`** - Client's IP address (from `cf-connecting-ip` or `x-forwarded-for`)
 - **`_longitude`** - Client's longitude (from `request.cf.longitude`)
 - **`_latitude`** - Client's latitude (from `request.cf.latitude`)
+- **`_country`** - Client's country
+- **`_city`** - Client's city
+- **`_region`** - Client's region
+- **`_asn`** - Client's ASN
+- **`_as_organization`** - Client's AS Organization
+- **`_request_path`** - URL path
+- **`_request_host`** - URL hostname
+- **`_request_method`** - HTTP method
+- **`_request_id`** - Request ID (from `cf-ray` or `x-request-id`)
+- **`_user_agent`** - User Agent string
 
 These fields are **only included if they exist** - no null values are logged.
 
@@ -196,6 +212,42 @@ requestLogger.info('Processing user request');
 requestLogger.debug('Fetching user data from database');
 ```
 
+### Global Context (Avoid Prop-Drilling)
+
+You can "hoist" the logger into a global context using `logger.run()`. This uses `AsyncLocalStorage` to make the logger available anywhere in your call stack without passing it as an argument.
+
+```javascript
+// worker.js
+import { GELFLogger } from '@walsys/cloudflare_worker-gelf_logger';
+import { handleUserRequest } from './handlers';
+
+export default {
+  async fetch(request, env, ctx) {
+    const logger = new GELFLogger({ env, request });
+
+    // Run the entire request handling within the logger context
+    return logger.run(async () => {
+      // Now you can access the logger anywhere without passing it
+      return await handleUserRequest(request);
+    });
+  }
+};
+
+// handlers.js
+import { GELFLogger } from '@walsys/cloudflare_worker-gelf_logger';
+
+export async function handleUserRequest(request) {
+  // Retrieve the current logger instance
+  const logger = GELFLogger.current;
+  
+  if (logger) {
+    logger.info('Handling user request from global context');
+  }
+
+  return new Response('OK');
+}
+```
+
 ### Custom Fields
 
 ```javascript
@@ -256,6 +308,25 @@ Creates a child logger with additional context fields.
 
 ```javascript
 const childLogger = logger.child({ request_id: '12345' });
+```
+
+**`run(callback)`**
+
+Runs a callback function within the context of this logger instance.
+
+```javascript
+logger.run(() => {
+  // GELFLogger.current will return this logger inside here
+  someDeeplyNestedFunction();
+});
+```
+
+**`static get current`**
+
+Retrieves the current logger instance from the async context.
+
+```javascript
+const logger = GELFLogger.current;
 ```
 
 **`async flush()`**
