@@ -67,6 +67,8 @@ The logger automatically consumes these Cloudflare Worker environment variables:
 | `ENVIRONMENT` | Environment name (e.g., production, staging) | No | Not logged if absent |
 | `FUNCTION_NAME` | Function/route name | No | Not logged if absent |
 | `LOG_SESSION_ID` | Session ID for message segmentation | No | Generated UUID |
+| `ACCESS_ID` | Cloudflare Access Client ID for service authentication | No | - |
+| `ACCESS_SECRET` | Cloudflare Access Client Secret for service authentication | No | - |
 
 ### Setting Environment Variables
 
@@ -79,6 +81,35 @@ WORKER_NAME = "api-gateway"
 ENVIRONMENT = "production"
 FUNCTION_NAME = "user-authentication"
 ```
+
+### Cloudflare Access Service Authentication
+
+If your log server is protected by Cloudflare Access, you can configure service authentication using the `ACCESS_ID` and `ACCESS_SECRET` environment variables. These will be automatically included as `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers in all requests to your GELF endpoint.
+
+To set up Cloudflare Access service authentication:
+
+1. **Create a Service Token** in your Cloudflare Access dashboard:
+   - Go to Access > Service Auth > Service Tokens
+   - Click "Create Service Token"
+   - Save the Client ID and Client Secret
+
+2. **Add the credentials to your Worker**:
+
+```toml
+[vars]
+GELF_LOGGING_URL = "https://your-protected-graylog-server.com/gelf"
+ACCESS_ID = "your-service-token-client-id"
+ACCESS_SECRET = "your-service-token-client-secret"
+```
+
+**Security Note**: For production environments, consider using Cloudflare Worker secrets instead of plain environment variables:
+
+```bash
+wrangler secret put ACCESS_ID
+wrangler secret put ACCESS_SECRET
+```
+
+When both `ACCESS_ID` and `ACCESS_SECRET` are configured, the logger will automatically include the required headers for Cloudflare Access authentication on all log requests.
 
 ## Configuration Options
 

@@ -38,7 +38,7 @@ export class GELFLogger {
 	 * Create a new GELF Logger instance
 	 *
 	 * @param {Object} config - Configuration object
-	 * @param {Object} config.env - Cloudflare Worker env object (automatically uses env.GELF_LOGGING_URL, env.WORKER_NAME, env.ENVIRONMENT, env.FUNCTION_NAME, env.LOG_SESSION_ID)
+	 * @param {Object} config.env - Cloudflare Worker env object (automatically uses env.GELF_LOGGING_URL, env.WORKER_NAME, env.ENVIRONMENT, env.FUNCTION_NAME, env.LOG_SESSION_ID, env.ACCESS_ID, env.ACCESS_SECRET)
 	 * @param {Request} config.request - Optional Cloudflare Request object (extracts colo, IP, longitude, latitude from request.cf)
 	 * @param {string} config.log_session_id - Optional session ID (UUID) to segment messages. Defaults to env.LOG_SESSION_ID or generates new UUID.
 	 * @param {string} config.endpoint - GELF HTTP endpoint URL (optional - will use env.GELF_LOGGING_URL if not provided)
@@ -64,6 +64,10 @@ export class GELFLogger {
 			console.error('GELFLogger: No endpoint provided. Set GELF_LOGGING_URL environment variable or pass endpoint in config.');
 			this.endpoint = null;
 		}
+
+		// Cloudflare Access credentials for service authentication
+		this.accessId = config.env?.ACCESS_ID;
+		this.accessSecret = config.env?.ACCESS_SECRET;
 
 		// GELF required fields with Cloudflare Worker defaults
 		// host: Use WORKER_NAME from env if available, otherwise fall back to generic name
@@ -277,13 +281,22 @@ export class GELFLogger {
 		const controller = new AbortController();
 		const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
+		// Build headers object
+		const headers = {
+			'Content-Type': 'application/json',
+			'Accept': 'application/json'
+		};
+
+		// Add Cloudflare Access headers if credentials are configured
+		if (this.accessId && this.accessSecret) {
+			headers['CF-Access-Client-Id'] = this.accessId;
+			headers['CF-Access-Client-Secret'] = this.accessSecret;
+		}
+
 		// Create non-blocking promise
 		const promise = fetch(this.endpoint, {
 			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'Accept': 'application/json'
-			},
+			headers: headers,
 			body: JSON.stringify(gelfMessage),
 			signal: controller.signal
 		})
@@ -564,9 +577,11 @@ export class GELFLogger {
 			overloadConsole: this.overloadConsole, // Pass overloadConsole to child
 			timeout: this.timeout
 		});
-		// Preserve Cloudflare context and session ID in child logger
+		// Preserve Cloudflare context, session ID, and access credentials in child logger
 		childLogger.cfContext = { ...this.cfContext };
 		childLogger.log_session_id = this.log_session_id;
+		childLogger.accessId = this.accessId;
+		childLogger.accessSecret = this.accessSecret;
 		return childLogger;
 	}
 
