@@ -64,11 +64,17 @@ class GelfLogger {
     }
 
     try {
+      if (!this.wsConnection) {
+        throw new Error('WebSocket connection is not available');
+      }
       this.wsConnection.send(JSON.stringify(message));
     } catch (error) {
       console.error('Failed to send log via WebSocket:', error);
       // Try to reconnect and resend
       await this.reconnectWebSocket();
+      if (!this.wsConnection) {
+        throw new Error('WebSocket connection failed to re-establish');
+      }
       this.wsConnection.send(JSON.stringify(message));
     }
   }
@@ -80,7 +86,8 @@ class GelfLogger {
 
     return new Promise((resolve, reject) => {
       try {
-        this.wsConnection = new WebSocket(this.wsEndpoint);
+        // `this.wsEndpoint` is known to be defined above
+        this.wsConnection = new WebSocket(this.wsEndpoint as string);
         
         this.wsConnection.onopen = () => {
           this.reconnectAttempts = 0;
@@ -111,7 +118,12 @@ class GelfLogger {
 
   private async reconnectWebSocket(): Promise<void> {
     if (this.wsConnection) {
-      this.wsConnection.close();
+      try {
+        this.wsConnection.close();
+      } catch (e) {
+        // ignore close errors
+      }
+      this.wsConnection = null;
     }
     await this.connectWebSocket();
   }
