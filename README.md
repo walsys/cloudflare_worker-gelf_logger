@@ -573,3 +573,74 @@ Contributions are welcome! Please open an issue or submit a pull request.
 ---
 
 Made with ❤️ for Cloudflare Workers
+# Cloudflare Worker GELF Logger
+
+A GELF logger for Cloudflare Workers that supports both standard HTTP logging and WebSocket streaming.
+
+## Features
+
+- Standard HTTP logging (default)
+- WebSocket streaming mode to bypass Cloudflare's 500 sub-request limit
+- Automatic reconnection logic
+- Full GELF message support
+- TypeScript support
+- Message queuing for high-frequency logging
+
+## Installation
+
+```bash
+npm install cloudflare_worker-gelf_logger
+```
+
+## Usage
+
+### Standard HTTP Logging
+
+```javascript
+import { GelfLogger } from 'cloudflare_worker-gelf_logger';
+
+const logger = new GelfLogger({
+  endpoint: 'http://your-gelf-endpoint:12201/gelf'
+});
+
+await logger.info('Application started');
+await logger.error('Something went wrong');
+```
+
+### WebSocket Streaming Mode
+
+```javascript
+import { GelfLogger } from 'cloudflare_worker-gelf_logger';
+
+const logger = new GelfLogger({
+  endpoint: 'http://your-gelf-endpoint:12201/gelf',
+  useWebSocket: true,
+  wsEndpoint: 'ws://your-streaming-proxy:8080/ws'
+});
+
+await logger.info('Application started');
+await logger.error('Something went wrong');
+```
+
+## Configuration
+
+### Options
+
+- `endpoint` (string): The GELF endpoint URL
+- `useWebSocket` (boolean, optional): Enable WebSocket streaming mode (default: false)
+- `wsEndpoint` (string, optional): WebSocket endpoint URL (required when useWebSocket is true)
+- `headers` (object, optional): Additional headers to send with requests
+
+## How It Works
+
+When `useWebSocket` is enabled, the logger establishes a persistent WebSocket connection to the streaming proxy. Instead of making individual HTTP requests for each log message, it sends messages over the WebSocket connection. This approach bypasses Cloudflare's 500 sub-request limit by using a single persistent connection.
+
+The logger also implements message queuing for high-frequency logging scenarios, ensuring that messages are sent efficiently even under heavy load.
+
+## Proxy Setup
+
+To use WebSocket streaming, you need to deploy the `streaming_gelf` proxy service:
+
+1. Build the Docker image: `docker build -t streaming_gelf .`
+2. Run the container: `docker run -p 8080:8080 streaming_gelf`
+3. Point your logger to the proxy endpoint: `ws://your-proxy:8080/ws`

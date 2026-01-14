@@ -42,6 +42,8 @@ export class GELFLogger {
 	 * @param {Request} config.request - Optional Cloudflare Request object (extracts colo, IP, longitude, latitude from request.cf)
 	 * @param {string} config.log_session_id - Optional session ID (UUID) to segment messages. Defaults to env.LOG_SESSION_ID or generates new UUID.
 	 * @param {string} config.endpoint - GELF HTTP endpoint URL (optional - will use env.GELF_LOGGING_URL if not provided)
+	 * @param {boolean} config.useWebSocket - Use WebSocket instead of HTTP (default: false)
+	 * @param {string} config.wsEndpoint - WebSocket endpoint URL (required if useWebSocket is true)
 	 * @param {string} config.host - Hostname identifier (default: worker name from env.WORKER_NAME or 'cloudflare-worker')
 	 * @param {string} config.facility - Facility/application name (default: 'worker')
 	 * @param {Object} config.globalFields - Global custom fields to include in all logs
@@ -56,13 +58,26 @@ export class GELFLogger {
 		// Priority: config.log_session_id > config.env.LOG_SESSION_ID > crypto.randomUUID()
 		this.log_session_id = config.log_session_id || config.env?.LOG_SESSION_ID || crypto.randomUUID();
 
+		// WebSocket configuration
+		this.useWebSocket = config.useWebSocket || false;
+		this.wsEndpoint = config.wsEndpoint;
+		this.wsConnection = null;
+		this.wsMessageQueue = [];
+		this.wsConnecting = false;
+		this.wsReconnectAttempts = 0;
+		this.wsMaxReconnectAttempts = config.wsMaxReconnectAttempts || 5;
+
 		// Endpoint configuration - automatically use env.GELF_LOGGING_URL if available
 		this.endpoint = config.endpoint || config.env?.GELF_LOGGING_URL;
 
 		// Validate endpoint
-		if (!this.endpoint || typeof this.endpoint !== 'string') {
+		if (!this.useWebSocket && (!this.endpoint || typeof this.endpoint !== 'string')) {
 			console.error('GELFLogger: No endpoint provided. Set GELF_LOGGING_URL environment variable or pass endpoint in config.');
 			this.endpoint = null;
+		}
+
+		if (this.useWebSocket && !this.wsEndpoint) {
+			console.error('GELFLogger: wsEndpoint is required when useWebSocket is true.');
 		}
 
 		// Cloudflare Access credentials for service authentication
@@ -265,6 +280,11 @@ export class GELFLogger {
 	 * @param {Object} gelfMessage - GELF message object
 	 */
 	_send(gelfMessage) {
+		// Check if using WebSocket
+		if (this.useWebSocket) {
+			return this._sendWebSocket(gelfMessage);
+		}
+
 		// Skip sending if no endpoint configured
 		if (!this.endpoint) {
 			this.stats.failed++;
@@ -361,6 +381,146 @@ export class GELFLogger {
 		// Clean up resolved promises periodically
 		if (this.pendingPromises.length > 100) {
 			this._cleanupPromises();
+		}
+	}
+
+	/**
+	 * Send a log message via WebSocket (non-blocking)
+	 *
+	 * @private
+	 * @param {Object} gelfMessage - GELF message object
+	 */
+	_sendWebSocket(gelfMessage) {
+		// Skip sending if no WebSocket endpoint configured
+		if (!this.wsEndpoint) {
+			this.stats.failed++;
+			this._logFailure({
+				message: gelfMessage,
+				reason: 'no_ws_endpoint',
+				error: 'No WebSocket endpoint configured',
+				timestamp: Date.now()
+			});
+			return;
+		}
+
+		// Queue message
+		this.wsMessageQueue.push(gelfMessage);
+
+		// Process queue if connection is ready
+		if (this.wsConnection && this.wsConnection.readyState === 1) { // OPEN
+			this._processWebSocketQueue();
+		} else if (!this.wsConnection || this.wsConnection.readyState === 3) { // CLOSED
+			// Attempt to connect
+			this._connectWebSocket();
+		}
+	}
+
+	/**
+	 * Connect to WebSocket endpoint
+	 *
+	 * @private
+	 */
+	_connectWebSocket() {
+		if (this.wsConnecting) {
+			return; // Already attempting to connect
+		}
+
+		this.wsConnecting = true;
+
+		try {
+			this.wsConnection = new WebSocket(this.wsEndpoint);
+
+					this.wsConnection.onopen = () => {
+				this.wsConnecting = false;
+				this.wsReconnectAttempts = 0;
+				if (this.consoleLog && !this.overloadConsole) {
+					console.log('GELFLogger: WebSocket connected');
+				}
+						// Authenticate over WebSocket if credentials provided
+						this.wsAuthenticated = false;
+						if (this.accessId && this.accessSecret) {
+							try {
+								const authMsg = {
+									type: 'auth',
+									access_id: this.accessId,
+									access_secret: this.accessSecret,
+									log_session_id: this.log_session_id
+								};
+								// Send auth message immediately; server should respond with ack
+								this.wsConnection.send(JSON.stringify(authMsg));
+								// Set a timeout for authentication
+								if (!this.wsAuthTimeout) this.wsAuthTimeout = config?.wsAuthTimeout || 5000;
+								this._wsAuthTimer = setTimeout(() => {
+									if (!this.wsAuthenticated) {
+										if (this.consoleLog && !this.overloadConsole) console.warn('GELFLogger: WebSocket auth timeout');
+										// Still attempt to process queue (server may accept messages without auth ack)
+										this._processWebSocketQueue();
+									}
+								}, this.wsAuthTimeout);
+							} catch (e) {
+								// If send fails, still attempt to process queue
+								this._processWebSocketQueue();
+							}
+						} else {
+							// No credentials — process queue immediately
+							this._processWebSocketQueue();
+						}
+			};
+
+			this.wsConnection.onclose = () => {
+				this.wsConnecting = false;
+				if (this.consoleLog && !this.overloadConsole) {
+					console.log('GELFLogger: WebSocket closed');
+				}
+				// Attempt reconnection with exponential backoff
+				if (this.wsReconnectAttempts < this.wsMaxReconnectAttempts) {
+					this.wsReconnectAttempts++;
+					const delay = Math.min(1000 * Math.pow(2, this.wsReconnectAttempts), 30000);
+					setTimeout(() => this._connectWebSocket(), delay);
+				}
+			};
+
+			this.wsConnection.onerror = (error) => {
+				this.wsConnecting = false;
+				if (this.consoleLog && !this.overloadConsole) {
+					console.error('GELFLogger: WebSocket error:', error);
+				}
+			};
+		} catch (error) {
+			this.wsConnecting = false;
+			if (this.consoleLog && !this.overloadConsole) {
+				console.error('GELFLogger: WebSocket connection failed:', error);
+			}
+		}
+	}
+
+	/**
+	 * Process queued WebSocket messages
+	 *
+	 * @private
+	 */
+	_processWebSocketQueue() {
+		if (!this.wsConnection || this.wsConnection.readyState !== 1) {
+			return; // Not connected
+		}
+
+		while (this.wsMessageQueue.length > 0) {
+			const message = this.wsMessageQueue.shift();
+			try {
+				this.wsConnection.send(JSON.stringify(message));
+				this.stats.sent++;
+			} catch (error) {
+				this.stats.failed++;
+				this._logFailure({
+					message: message,
+					reason: 'ws_send_error',
+					error: error.message,
+					timestamp: Date.now()
+				});
+				// Re-queue message for retry
+				this.wsMessageQueue.unshift(message);
+				break;
+			}
 		}
 	}
 
@@ -569,12 +729,14 @@ export class GELFLogger {
 	child(contextFields = {}) {
 		const childLogger = new GELFLogger({
 			endpoint: this.endpoint,
+			useWebSocket: this.useWebSocket,
+			wsEndpoint: this.wsEndpoint,
 			host: this.host,
 			facility: this.facility,
 			globalFields: { ...this.globalFields, ...contextFields },
 			minLevel: this.minLevel,
 			consoleLog: this.consoleLog,
-			overloadConsole: this.overloadConsole, // Pass overloadConsole to child
+			overloadConsole: this.overloadConsole,
 			timeout: this.timeout
 		});
 		// Preserve Cloudflare context, session ID, and access credentials in child logger
@@ -582,6 +744,11 @@ export class GELFLogger {
 		childLogger.log_session_id = this.log_session_id;
 		childLogger.accessId = this.accessId;
 		childLogger.accessSecret = this.accessSecret;
+		// Share WebSocket connection with parent
+		if (this.useWebSocket) {
+			childLogger.wsConnection = this.wsConnection;
+			childLogger.wsMessageQueue = this.wsMessageQueue;
+		}
 		return childLogger;
 	}
 
@@ -764,6 +931,24 @@ export class GELFLogger {
 
 					// Call the GELF logger
 					logger._log(level, shortMessage, fullMessage, customFields);
+				};
+
+				this.wsConnection.onmessage = (event) => {
+					try {
+						const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+						if (data && data.type === 'auth_ack') {
+							this.wsAuthenticated = true;
+							if (this._wsAuthTimer) {
+								clearTimeout(this._wsAuthTimer);
+								this._wsAuthTimer = null;
+							}
+							if (this.consoleLog && !this.overloadConsole) console.log('GELFLogger: WebSocket authenticated');
+							// Now that we're authenticated, process the queue
+							this._processWebSocketQueue();
+						}
+					} catch (e) {
+						// Non-JSON or unrelated message — ignore
+					}
 				};
 			}
 		});
