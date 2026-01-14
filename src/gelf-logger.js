@@ -409,18 +409,24 @@ export class GELFLogger {
 		// Process queue if connection is ready
 		if (this.wsConnection && this.wsConnection.readyState === 1) { // OPEN
 			this._processWebSocketQueue();
-		} else if (!this.wsConnection || this.wsConnection.readyState === 3) { // CLOSED
-			// Attempt to connect
-			this._connectWebSocket();
+		} else if (!this.wsConnection || this.wsConnection.readyState === 3) { // CLOSED or no connection
+			// Attempt to connect (only if not already connecting)
+			if (!this.wsConnecting) {
+				this._connectWebSocket();
+			}
+			// Messages stay in queue and will be processed when connection is established
 		}
+		// If readyState is 0 (CONNECTING) or 2 (CLOSING), messages stay queued
+		// and will be processed when connection is established via event handler
 	}
 
 	/**
 	 * Connect to WebSocket endpoint
+	 * Uses fetch with Upgrade header to support Cloudflare Access authentication headers
 	 *
 	 * @private
 	 */
-	_connectWebSocket() {
+	async _connectWebSocket() {
 		if (this.wsConnecting) {
 			return; // Already attempting to connect
 		}
@@ -428,68 +434,132 @@ export class GELFLogger {
 		this.wsConnecting = true;
 
 		try {
-			this.wsConnection = new WebSocket(this.wsEndpoint);
+			// Build headers for WebSocket connection
+			const headers = {
+				'Upgrade': 'websocket',
+			};
 
-					this.wsConnection.onopen = () => {
+			// Add Cloudflare Access headers if credentials are configured
+			if (this.accessId && this.accessSecret) {
+				headers['CF-Access-Client-Id'] = this.accessId;
+				headers['CF-Access-Client-Secret'] = this.accessSecret;
+			}
+
+			// Use fetch with Upgrade header for Cloudflare Workers WebSocket with auth headers
+			const response = await fetch(this.wsEndpoint, { headers });
+
+			if (response.webSocket) {
+				this.wsConnection = response.webSocket;
+				this.wsConnection.accept();
+
 				this.wsConnecting = false;
 				this.wsReconnectAttempts = 0;
 				if (this.consoleLog && !this.overloadConsole) {
-					console.log('GELFLogger: WebSocket connected');
+					console.log('GELFLogger: WebSocket connected via fetch upgrade');
 				}
-						// Authenticate over WebSocket if credentials provided
-						this.wsAuthenticated = false;
-						if (this.accessId && this.accessSecret) {
-							try {
-								const authMsg = {
-									type: 'auth',
-									access_id: this.accessId,
-									access_secret: this.accessSecret,
-									log_session_id: this.log_session_id
-								};
-								// Send auth message immediately; server should respond with ack
-								this.wsConnection.send(JSON.stringify(authMsg));
-								// Set a timeout for authentication
-								if (!this.wsAuthTimeout) this.wsAuthTimeout = config?.wsAuthTimeout || 5000;
-								this._wsAuthTimer = setTimeout(() => {
-									if (!this.wsAuthenticated) {
-										if (this.consoleLog && !this.overloadConsole) console.warn('GELFLogger: WebSocket auth timeout');
-										// Still attempt to process queue (server may accept messages without auth ack)
-										this._processWebSocketQueue();
-									}
-								}, this.wsAuthTimeout);
-							} catch (e) {
-								// If send fails, still attempt to process queue
-								this._processWebSocketQueue();
-							}
-						} else {
-							// No credentials — process queue immediately
-							this._processWebSocketQueue();
-						}
-			};
 
-			this.wsConnection.onclose = () => {
+				// Process queued messages now that connection is established
+				this._processWebSocketQueue();
+
+				// Setup event handlers
+				this.wsConnection.addEventListener('message', (event) => {
+					try {
+						const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+						if (data && data.type === 'auth_ack') {
+							this.wsAuthenticated = true;
+							if (this._wsAuthTimer) {
+								clearTimeout(this._wsAuthTimer);
+								this._wsAuthTimer = null;
+							}
+							if (this.consoleLog && !this.overloadConsole) {
+								console.log('GELFLogger: WebSocket authenticated');
+							}
+						}
+					} catch (e) {
+						// Non-JSON or unrelated message — ignore
+					}
+				});
+
+				this.wsConnection.addEventListener('close', (event) => {
+					this.wsConnecting = false;
+					if (this.consoleLog && !this.overloadConsole) {
+						const closeDetails = {
+							code: event?.code,
+							reason: event?.reason || 'No reason provided',
+							wasClean: event?.wasClean,
+							wsEndpoint: this.wsEndpoint,
+							reconnectAttempts: this.wsReconnectAttempts,
+							queueLength: this.wsMessageQueue?.length || 0
+						};
+						console.log('GELFLogger: WebSocket closed:', JSON.stringify(closeDetails));
+					}
+					// Attempt reconnection with exponential backoff
+					if (this.wsReconnectAttempts < this.wsMaxReconnectAttempts) {
+						this.wsReconnectAttempts++;
+						const delay = Math.min(1000 * Math.pow(2, this.wsReconnectAttempts), 30000);
+						setTimeout(() => this._connectWebSocket(), delay);
+					}
+				});
+
+				this.wsConnection.addEventListener('error', (event) => {
+					this.wsConnecting = false;
+					if (this.consoleLog && !this.overloadConsole) {
+						// Extract useful information from the ErrorEvent
+						const errorDetails = {
+							type: event?.type || 'unknown',
+							message: event?.message || 'No message available',
+							error: event?.error?.message || event?.error || null,
+							wsEndpoint: this.wsEndpoint,
+							wsReadyState: this.wsConnection?.readyState,
+							wsReadyStateLabel: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][this.wsConnection?.readyState] || 'UNKNOWN',
+							reconnectAttempts: this.wsReconnectAttempts,
+							queueLength: this.wsMessageQueue?.length || 0
+						};
+						console.error('GELFLogger: WebSocket error:', JSON.stringify(errorDetails));
+					}
+					// Attempt reconnection on error (close event may not always fire)
+					if (this.wsReconnectAttempts < this.wsMaxReconnectAttempts) {
+						this.wsReconnectAttempts++;
+						const delay = Math.min(1000 * Math.pow(2, this.wsReconnectAttempts), 30000);
+						setTimeout(() => this._connectWebSocket(), delay);
+					}
+				});
+			} else {
+				// Fetch upgrade failed - no WebSocket in response
 				this.wsConnecting = false;
+				const upgradeError = {
+					status: response.status,
+					statusText: response.statusText,
+					wsEndpoint: this.wsEndpoint,
+					reconnectAttempts: this.wsReconnectAttempts
+				};
 				if (this.consoleLog && !this.overloadConsole) {
-					console.log('GELFLogger: WebSocket closed');
+					console.error('GELFLogger: WebSocket upgrade failed:', JSON.stringify(upgradeError));
 				}
-				// Attempt reconnection with exponential backoff
+				// Attempt reconnection
 				if (this.wsReconnectAttempts < this.wsMaxReconnectAttempts) {
 					this.wsReconnectAttempts++;
 					const delay = Math.min(1000 * Math.pow(2, this.wsReconnectAttempts), 30000);
 					setTimeout(() => this._connectWebSocket(), delay);
 				}
-			};
-
-			this.wsConnection.onerror = (error) => {
-				this.wsConnecting = false;
-				if (this.consoleLog && !this.overloadConsole) {
-					console.error('GELFLogger: WebSocket error:', error);
-				}
-			};
+			}
 		} catch (error) {
 			this.wsConnecting = false;
 			if (this.consoleLog && !this.overloadConsole) {
-				console.error('GELFLogger: WebSocket connection failed:', error);
+				const connectionError = {
+					name: error?.name || 'UnknownError',
+					message: error?.message || String(error),
+					stack: error?.stack,
+					wsEndpoint: this.wsEndpoint,
+					reconnectAttempts: this.wsReconnectAttempts
+				};
+				console.error('GELFLogger: WebSocket connection failed:', JSON.stringify(connectionError));
+			}
+			// Attempt reconnection on connection failure
+			if (this.wsReconnectAttempts < this.wsMaxReconnectAttempts) {
+				this.wsReconnectAttempts++;
+				const delay = Math.min(1000 * Math.pow(2, this.wsReconnectAttempts), 30000);
+				setTimeout(() => this._connectWebSocket(), delay);
 			}
 		}
 	}
@@ -755,11 +825,49 @@ export class GELFLogger {
 	/**
 	 * Wait for all pending log messages to complete
 	 * Useful for ensuring logs are sent before worker termination
+	 * For WebSocket mode, ensures connection is established and queue is drained
 	 *
 	 * @returns {Promise<void>}
 	 */
 	async flush() {
 		try {
+			// For WebSocket mode, ensure connection and drain queue
+			if (this.useWebSocket) {
+				// Wait for connection if currently connecting
+				if (this.wsConnecting) {
+					// Poll until connected or max wait time (5 seconds)
+					const maxWait = 5000;
+					const startTime = Date.now();
+					while (this.wsConnecting && (Date.now() - startTime) < maxWait) {
+						await new Promise(resolve => setTimeout(resolve, 50));
+					}
+				}
+
+				// If not connected, attempt to connect and wait
+				if (!this.wsConnection || this.wsConnection.readyState !== 1) {
+					await this._connectWebSocket();
+					// Wait a bit for connection to establish
+					const maxWait = 5000;
+					const startTime = Date.now();
+					while (this.wsConnecting && (Date.now() - startTime) < maxWait) {
+						await new Promise(resolve => setTimeout(resolve, 50));
+					}
+				}
+
+				// Process any remaining queued messages
+				if (this.wsConnection && this.wsConnection.readyState === 1 && this.wsMessageQueue.length > 0) {
+					this._processWebSocketQueue();
+				}
+
+				// If still have messages in queue after processing, log warning
+				if (this.wsMessageQueue.length > 0) {
+					if (this.consoleLog && !this.overloadConsole) {
+						console.warn(`GELFLogger: flush() completed with ${this.wsMessageQueue.length} messages still in queue (connection state: ${this.wsConnection?.readyState})`);
+					}
+				}
+			}
+
+			// Wait for any HTTP pending promises (HTTP mode)
 			await Promise.allSettled(this.pendingPromises);
 			this.pendingPromises = [];
 		} catch (error) {
@@ -776,10 +884,25 @@ export class GELFLogger {
 	 * @returns {Object} Stats object with sent, failed, and skipped counts
 	 */
 	getStats() {
-		return {
+		const stats = {
 			...this.stats,
 			failedMessagesCount: this.failedMessages.length
 		};
+
+		// Add WebSocket-specific stats if using WebSocket mode
+		if (this.useWebSocket) {
+			stats.ws = {
+				queueLength: this.wsMessageQueue?.length || 0,
+				connected: this.wsConnection?.readyState === 1,
+				readyState: this.wsConnection?.readyState,
+				readyStateLabel: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][this.wsConnection?.readyState] || 'NO_CONNECTION',
+				reconnectAttempts: this.wsReconnectAttempts,
+				maxReconnectAttempts: this.wsMaxReconnectAttempts,
+				connecting: this.wsConnecting
+			};
+		}
+
+		return stats;
 	}
 
 	/**
@@ -931,24 +1054,6 @@ export class GELFLogger {
 
 					// Call the GELF logger
 					logger._log(level, shortMessage, fullMessage, customFields);
-				};
-
-				this.wsConnection.onmessage = (event) => {
-					try {
-						const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
-						if (data && data.type === 'auth_ack') {
-							this.wsAuthenticated = true;
-							if (this._wsAuthTimer) {
-								clearTimeout(this._wsAuthTimer);
-								this._wsAuthTimer = null;
-							}
-							if (this.consoleLog && !this.overloadConsole) console.log('GELFLogger: WebSocket authenticated');
-							// Now that we're authenticated, process the queue
-							this._processWebSocketQueue();
-						}
-					} catch (e) {
-						// Non-JSON or unrelated message — ignore
-					}
 				};
 			}
 		});

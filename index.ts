@@ -96,8 +96,15 @@ class GelfLogger {
           resolve();
         };
 
-        this.wsConnection.onclose = () => {
-          console.log('WebSocket connection closed');
+        this.wsConnection.onclose = (event: CloseEvent) => {
+          const closeDetails = {
+            code: event?.code,
+            reason: event?.reason || 'No reason provided',
+            wasClean: event?.wasClean,
+            wsEndpoint: this.wsEndpoint,
+            reconnectAttempts: this.reconnectAttempts
+          };
+          console.log('WebSocket connection closed:', JSON.stringify(closeDetails));
           if (this.reconnectAttempts < this.maxReconnectAttempts) {
             this.reconnectAttempts++;
             setTimeout(() => {
@@ -106,9 +113,18 @@ class GelfLogger {
           }
         };
 
-        this.wsConnection.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          reject(error);
+        this.wsConnection.onerror = (event: Event) => {
+          const errorDetails = {
+            type: (event as ErrorEvent)?.type || 'unknown',
+            message: (event as ErrorEvent)?.message || 'No message available',
+            error: (event as ErrorEvent)?.error?.message || (event as ErrorEvent)?.error || null,
+            wsEndpoint: this.wsEndpoint,
+            wsReadyState: this.wsConnection?.readyState,
+            wsReadyStateLabel: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][this.wsConnection?.readyState ?? -1] || 'UNKNOWN',
+            reconnectAttempts: this.reconnectAttempts
+          };
+          console.error('WebSocket error:', JSON.stringify(errorDetails));
+          reject(new Error(JSON.stringify(errorDetails)));
         };
       } catch (error) {
         reject(error);
